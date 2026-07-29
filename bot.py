@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 
 # ===== КОНФИГ =====
 BOT_TOKEN = "8979594440:AAGfEOb84G4KS0kqNOfdODZVcIUXOoaELTY"
-DATABASE_URL = "postgresql://postgres:ymyCAsABvLfGgkjYYJYNzjKtvpsAxJlx@postgres.railway.internal:5432/railway"
+DATABASE_URL = "postgresql://postgres:MbxFiapCrUTDtJamuMWuUlDTfYRiHjik@postgres.railway.internal:5432/railway"
 ADMIN_ID = 7989621596
 
 # ===== ЧЁРНЫЙ СПИСОК =====
@@ -23,7 +23,7 @@ BLACKLIST_PHONES = [
     "+79964813813"
 ]
 
-# ===== API КЛЮЧИ =====
+# ===== API КЛЮЧИ (ЗАМЕНИ НА СВОИ) =====
 API_KEYS = [
     {"api_id": 94575, "api_hash": "a3406de8d171bb422bb6ddf3bbd800e2"},
     {"api_id": 2040, "api_hash": "b18441a1ff607e10a989891a5462e627"},
