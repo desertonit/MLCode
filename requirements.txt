@@ -1,4 +1,3 @@
 telethon
 aiogram
-asyncpg
 requests
