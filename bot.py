@@ -6,15 +6,17 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import asyncio
 import logging
 import random
-import asyncpg
 import re
 import requests
+import os
 from datetime import datetime, timedelta
 
 # ===== КОНФИГ =====
 BOT_TOKEN = "8979594440:AAGfEOb84G4KS0kqNOfdODZVcIUXOoaELTY"
-DATABASE_URL = "postgresql://postgres:MbxFiapCrUTDtJamuMWuUlDTfYRiHjik@postgres.railway.internal:5432/railway"
 ADMIN_ID = 7989621596
+
+# ===== ХРАНИЛИЩЕ В ПАМЯТИ =====
+users = {}  # {user_id: {"rank": "vip", "expire": "2024-..."}}
 
 # ===== ЧЁРНЫЙ СПИСОК =====
 BLACKLIST_PHONES = [
@@ -23,7 +25,7 @@ BLACKLIST_PHONES = [
     "+79964813813"
 ]
 
-# ===== API КЛЮЧИ (ЗАМЕНИ НА СВОИ) =====
+# ===== API КЛЮЧИ =====
 API_KEYS = [
     {"api_id": 94575, "api_hash": "a3406de8d171bb422bb6ddf3bbd800e2"},
     {"api_id": 2040, "api_hash": "b18441a1ff607e10a989891a5462e627"},
@@ -31,51 +33,6 @@ API_KEYS = [
     {"api_id": 17349, "api_hash": "344583e45741c457fe1862106095a5eb"},
     {"api_id": 15233, "api_hash": "d544bc5d4f6f08f1c5f9e8c7d3b2a1f4"},
 ]
-
-# ===== БАЗА ДАННЫХ =====
-db_pool = None
-
-async def init_db():
-    global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-    async with db_pool.acquire() as conn:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                rank TEXT DEFAULT 'user',
-                expire_date TEXT,
-                added_date TEXT
-            )
-        """)
-    print("✅ PostgreSQL подключён")
-
-async def get_user_rank(user_id):
-    if user_id == ADMIN_ID:
-        return 'admin', None
-    async with db_pool.acquire() as conn:
-        result = await conn.fetch("SELECT rank, expire_date FROM users WHERE user_id = $1", user_id)
-        if not result:
-            return 'user', None
-        rank, expire_date = result[0]['rank'], result[0]['expire_date']
-        if expire_date and datetime.now() > datetime.fromisoformat(expire_date):
-            await conn.execute("UPDATE users SET rank = 'user', expire_date = NULL WHERE user_id = $1", user_id)
-            return 'user', None
-        return rank, expire_date
-
-async def set_user_rank(user_id, rank, days=30):
-    expire_date = (datetime.now() + timedelta(days=days)).isoformat() if days else None
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO users (user_id, rank, expire_date) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET rank = $2, expire_date = $3",
-            user_id, rank, expire_date
-        )
-
-async def add_user_db(user_id):
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO users (user_id, added_date) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING",
-            user_id, datetime.now().isoformat()
-        )
 
 # ===== НАСТРОЙКА =====
 logging.basicConfig(level=logging.INFO)
@@ -91,6 +48,26 @@ def is_phone_blacklisted(phone):
         if bl in phone or phone in bl:
             return True
     return False
+
+def get_user_rank(user_id):
+    if user_id == ADMIN_ID:
+        return 'admin'
+    data = users.get(user_id, {})
+    rank = data.get('rank', 'user')
+    expire = data.get('expire')
+    if expire:
+        try:
+            if datetime.now() > datetime.fromisoformat(expire):
+                users[user_id] = {'rank': 'user', 'expire': None}
+                return 'user'
+        except:
+            pass
+    return rank
+
+def set_user_rank(user_id, rank, days=30):
+    expire = (datetime.now() + timedelta(days=days)).isoformat() if days else None
+    users[user_id] = {'rank': rank, 'expire': expire}
+    return True
 
 # ===== ПРОКСИ =====
 PROXY_POOL = []
@@ -150,7 +127,7 @@ SMART_DICT = [
 # ===== КЛАВИАТУРЫ =====
 def main_keyboard(user_id):
     builder = InlineKeyboardBuilder()
-    rank, _ = get_user_rank(user_id)
+    rank = get_user_rank(user_id)
     
     builder.row(InlineKeyboardButton(text="📤 Отправить код", callback_data="send_code"))
     builder.row(InlineKeyboardButton(text="👤 Профиль", callback_data="profile"))
@@ -199,7 +176,7 @@ def admin_keyboard():
     )
     builder.row(
         InlineKeyboardButton(text="🚫 Удалить из ЧС", callback_data="admin_remove_blacklist"),
-        InlineKeyboardButton(text="📋 Пользователи", callback_data="admin_list_users")
+        InlineKeyboardButton(text="📋 Список пользователей", callback_data="admin_list_users")
     )
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back"))
     return builder.as_markup()
@@ -412,8 +389,7 @@ async def fast_bruteforce_reverse(phone):
 @dp.message(Command("start"))
 async def start(message: types.Message):
     user_id = message.from_user.id
-    await add_user_db(user_id)
-    rank, expire = await get_user_rank(user_id)
+    rank = get_user_rank(user_id)
     
     rank_names = {
         'admin': '👑 АДМИН',
@@ -424,12 +400,6 @@ async def start(message: types.Message):
     }
     
     rank_display = rank_names.get(rank, '👤 ПОЛЬЗОВАТЕЛЬ')
-    if expire:
-        try:
-            days = (datetime.fromisoformat(expire) - datetime.now()).days
-            rank_display += f" (осталось {days} дн.)"
-        except:
-            pass
     
     await message.answer(
         f"⚡ ПОМОЩНИК С КОДАМИ\n\n"
@@ -437,11 +407,41 @@ async def start(message: types.Message):
         reply_markup=main_keyboard(user_id)
     )
 
+# ===== ЭКСПОРТ ПОЛЬЗОВАТЕЛЕЙ =====
+@dp.message(Command("export_users"))
+async def export_users(message: types.Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Только для админа")
+        return
+    
+    if not users:
+        await message.answer("📋 Нет пользователей в базе")
+        return
+    
+    text = "📋 СПИСОК ПОЛЬЗОВАТЕЛЕЙ:\n\n"
+    for user_id, data in users.items():
+        rank = data.get('rank', 'user')
+        expire = data.get('expire', 'нет')
+        text += f"👤 {user_id} — {rank.upper()} (до {expire})\n"
+    
+    if len(text) > 4000:
+        filename = f"users_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(text)
+        with open(filename, "rb") as f:
+            await message.answer_document(
+                types.BufferedInputFile(f.read(), filename=filename),
+                caption="📁 ВСЕ ПОЛЬЗОВАТЕЛИ"
+            )
+        os.remove(filename)
+    else:
+        await message.answer(text)
+
 # ===== CALLBACK HANDLER =====
 @dp.callback_query()
 async def callback_handler(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    rank, _ = await get_user_rank(user_id)
+    rank = get_user_rank(user_id)
     
     if not is_admin(user_id) and rank not in ['unlock', 'vip', 'antibot', 'admin']:
         await callback.answer("🚫 Нет доступа", show_alert=True)
@@ -463,7 +463,7 @@ async def callback_handler(callback: types.CallbackQuery):
         return
     
     if data == "profile":
-        rank, expire = await get_user_rank(user_id)
+        rank = get_user_rank(user_id)
         rank_names = {'admin': '👑 АДМИН', 'vip': '💎 VIP', 'antibot': '🤖 АнтиБот', 'unlock': '🔓 UNLOCK', 'user': '👤 ПОЛЬЗОВАТЕЛЬ'}
         await callback.message.edit_text(
             f"👤 ПРОФИЛЬ\n\nРанг: {rank_names.get(rank, '👤 ПОЛЬЗОВАТЕЛЬ')}",
@@ -547,12 +547,13 @@ async def callback_handler(callback: types.CallbackQuery):
         if not is_admin(user_id):
             await callback.answer("❌ Только для админа", show_alert=True)
             return
-        async with db_pool.acquire() as conn:
-            users = await conn.fetch("SELECT user_id, rank FROM users")
+        if not users:
+            text = "📋 ПОЛЬЗОВАТЕЛИ:\n\nНет пользователей"
+        else:
             text = "📋 ПОЛЬЗОВАТЕЛИ:\n\n"
-            for u in users:
-                status = "👑 ADMIN" if u['user_id'] == ADMIN_ID else u['rank'].upper()
-                text += f"{status} — {u['user_id']}\n"
+            for uid, data in users.items():
+                status = "👑 ADMIN" if uid == ADMIN_ID else data.get('rank', 'user').upper()
+                text += f"{status} — {uid}\n"
         await callback.message.edit_text(text[:4000], reply_markup=back_keyboard())
         await callback.answer()
         return
@@ -588,7 +589,7 @@ async def callback_handler(callback: types.CallbackQuery):
 @dp.message()
 async def text_handler(message: types.Message):
     user_id = message.from_user.id
-    rank, _ = await get_user_rank(user_id)
+    rank = get_user_rank(user_id)
     
     if rank == 'user' and not is_admin(user_id):
         await message.answer("🚫 Нет доступа. Купи подписку!")
@@ -613,7 +614,7 @@ async def text_handler(message: types.Message):
             return
         try:
             target = int(text)
-            await set_user_rank(target, 'unlock', 30)
+            set_user_rank(target, 'unlock', 30)
             await message.answer(f"✅ {target} теперь UNLOCK")
             try:
                 await bot.send_message(target, f"⚒️ Вам выдан UNLOCK на 30 дней")
@@ -633,7 +634,7 @@ async def text_handler(message: types.Message):
             return
         try:
             target = int(text)
-            await set_user_rank(target, 'vip', 30)
+            set_user_rank(target, 'vip', 30)
             await message.answer(f"✅ {target} теперь VIP")
             try:
                 await bot.send_message(target, f"⚒️ Вам выдан VIP на 30 дней")
@@ -653,7 +654,7 @@ async def text_handler(message: types.Message):
             return
         try:
             target = int(text)
-            await set_user_rank(target, 'antibot', 30)
+            set_user_rank(target, 'antibot', 30)
             await message.answer(f"✅ {target} теперь АнтиБот")
             try:
                 await bot.send_message(target, f"⚒️ Вам выдан АнтиБот на 30 дней")
@@ -676,7 +677,7 @@ async def text_handler(message: types.Message):
             if target == ADMIN_ID:
                 await message.answer("❌ Нельзя снять админа")
             else:
-                await set_user_rank(target, 'user', 0)
+                set_user_rank(target, 'user', 0)
                 await message.answer(f"✅ Подписка снята с {target}")
                 try:
                     await bot.send_message(target, f"🚫 Ваша подписка снята")
@@ -814,7 +815,6 @@ async def text_handler(message: types.Message):
 # ===== ЗАПУСК =====
 async def main():
     print("🤖 БОТ ЗАПУЩЕН!")
-    await init_db()
     load_proxies()
     print(f"🌐 Прокси загружено: {len(PROXY_POOL)}")
     await dp.start_polling(bot)
